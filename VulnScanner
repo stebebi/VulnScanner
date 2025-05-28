@@ -1,0 +1,148 @@
+$Timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+$BasePath = "$PSScriptRoot\VulnScan_$Timestamp"
+New-Item -ItemType Directory -Path $BasePath -Force | Out-Null
+
+# ---------------------------
+# MODULE 1: Missing Patches (Enhanced)
+# ---------------------------
+
+Write-Host "`n[+] Checking for missing security patches..." -ForegroundColor Cyan
+$MissingPatches = @()
+
+try {
+    $Session = New-Object -ComObject Microsoft.Update.Session
+    $Searcher = $Session.CreateUpdateSearcher()
+    $Results = $Searcher.Search("IsInstalled=0 and Type='Software'")
+
+    foreach ($Update in $Results.Updates) {
+        $MissingPatches += [PSCustomObject]@{
+            Title       = $Update.Title
+            KBs         = ($Update.KBArticleIDs -join ", ")
+            Severity    = $Update.MsrcSeverity
+            ReleaseDate = $Update.LastDeploymentChangeTime
+        }
+    }
+
+    $MissingPatches | Export-Csv -Path "$BasePath\MissingPatches.csv" -NoTypeInformation
+    Write-Host "[-] Missing patches saved to MissingPatches.csv" -ForegroundColor Green
+} catch {
+    Write-Warning "Unable to query Windows Update. Ensure script is run with admin privileges."
+}
+
+# ---------------------------
+# MODULE 2: Installed Software + CVE Check
+# ---------------------------
+
+Write-Host "`n[+] Enumerating installed software and checking for known CVEs..." -ForegroundColor Cyan
+
+$InstalledApps = Get-ItemProperty HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*, HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\* `
+    | Where-Object { $_.DisplayName } `
+    | Select-Object DisplayName, DisplayVersion, Publisher
+
+$AppVulnerabilities = @()
+
+Function Get-CVEData {
+    param ($Vendor, $Product)
+    $BaseUrl = "https://services.nvd.nist.gov/rest/json/cves/1.0"
+    $Query = "?keyword=$Vendor+$Product"
+    try {
+        return Invoke-RestMethod -Uri "$BaseUrl$Query" -UseBasicParsing
+    } catch {
+        Write-Warning "CVE fetch failed for $Vendor $Product"
+        return $null
+    }
+}
+
+foreach ($App in $InstalledApps) {
+    $CVEData = Get-CVEData -Vendor $App.Publisher -Product $App.DisplayName
+    $CVE_Count = if ($CVEData -and $CVEData.result.CVE_Items) { $CVEData.result.CVE_Items.Count } else { 0 }
+    
+    $AppVulnerabilities += [PSCustomObject]@{
+        Software   = $App.DisplayName
+        Version    = $App.DisplayVersion
+        Publisher  = $App.Publisher
+        CVE_Count  = $CVE_Count
+    }
+}
+
+$AppVulnerabilities | Export-Csv -Path "$BasePath\InstalledSoftware_CVE.csv" -NoTypeInformation
+Write-Host "[-] Installed software + CVE check saved to InstalledSoftware_CVE.csv" -ForegroundColor Green
+
+# ---------------------------
+# MODULE 3: Misconfiguration Checks
+# ---------------------------
+
+Write-Host "`n[+] Checking for common misconfigurations..." -ForegroundColor Cyan
+$Misconfigs = @()
+
+# SMBv1 check
+$SMB1 = Get-WindowsOptionalFeature -Online -FeatureName SMB1Protocol
+$Misconfigs += [PSCustomObject]@{
+    Feature = "SMBv1 Protocol"
+    State   = $SMB1.State
+    Enabled = $SMB1.State -eq "Enabled"
+}
+
+# RDP Status
+$RDPEnabled = (Get-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server').fDenyTSConnections -eq 0
+$Misconfigs += [PSCustomObject]@{
+    Feature = "Remote Desktop"
+    State   = if ($RDPEnabled) { "Enabled" } else { "Disabled" }
+    Enabled = $RDPEnabled
+}
+
+# TLS Checks
+$TLSKeys = @(
+    "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.0\Server",
+    "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.1\Server"
+)
+foreach ($Key in $TLSKeys) {
+    if (Test-Path $Key) {
+        $Enabled = (Get-ItemProperty -Path $Key -Name "Enabled" -ErrorAction SilentlyContinue)."Enabled"
+        $Misconfigs += [PSCustomObject]@{
+            Feature = $Key.Split('\')[-2]
+            State   = if ($Enabled -eq 1) { "Enabled" } else { "Disabled" }
+            Enabled = $Enabled -eq 1
+        }
+    }
+}
+
+$Misconfigs | Export-Csv -Path "$BasePath\Misconfigurations.csv" -NoTypeInformation
+Write-Host "[-] Misconfigurations saved to Misconfigurations.csv" -ForegroundColor Green
+
+# ---------------------------
+# MODULE 4: Remote Security Scan
+# ---------------------------
+
+Write-Host "`n[+] Initiating remote patch enumeration..." -ForegroundColor Cyan
+$RemoteComputers = @("Host1", "Host2")  # Customize this list
+$RemoteResults = @()
+
+Function Scan-RemotePatches {
+    param ($ComputerName)
+    try {
+        Invoke-Command -ComputerName $ComputerName -ScriptBlock {
+            Get-HotFix | Select-Object -Property Description, HotFixID, InstalledOn
+        } -ErrorAction Stop
+    } catch {
+        Write-Warning "Failed to scan $ComputerName"
+        return @()
+    }
+}
+
+foreach ($Comp in $RemoteComputers) {
+    $Patches = Scan-RemotePatches -ComputerName $Comp
+    foreach ($Patch in $Patches) {
+        $RemoteResults += [PSCustomObject]@{
+            Computer     = $Comp
+            HotFixID     = $Patch.HotFixID
+            Description  = $Patch.Description
+            InstalledOn  = $Patch.InstalledOn
+        }
+    }
+}
+
+$RemoteResults | Export-Csv -Path "$BasePath\RemoteHotfixes.csv" -NoTypeInformation
+Write-Host "[-] Remote patch info saved to RemoteHotfixes.csv" -ForegroundColor Green
+
+Write-Host "`n[✔] Vulnerability scan completed. Results saved in: $BasePath" -ForegroundColor Yellow
