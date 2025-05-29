@@ -28,7 +28,12 @@
 
 ## 📁 Output Structure
 
-
+VulnScan_yyyy-MM-dd_HH-mm-ss
+│
+├── MissingPatches.csv
+├── InstalledSoftware.csv
+├── Misconfigurations.csv
+└── RemoteHotfixes.csv
 ---
 
 ## 💻 Usage
