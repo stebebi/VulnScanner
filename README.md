@@ -28,3 +28,11 @@
 
 ## 📁 Output Structure
 
+
+---
+
+## 💻 Usage
+
+```powershell
+# Run from PowerShell as Administrator
+.\VulnScanner.ps1
