@@ -36,3 +36,10 @@
 ```powershell
 # Run from PowerShell as Administrator
 .\VulnScanner.ps1
+
+🧩 Requirements
+PowerShell 5.1+
+
+Internet connection (for CVE API lookup)
+
+Admin privileges (for full scan capabilities)
